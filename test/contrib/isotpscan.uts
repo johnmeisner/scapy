@@ -4,7 +4,7 @@
 ~ conf
 
 = Imports
-load_layer("can")
+load_layer("can", globals_dict=globals())
 conf.contribs['CAN']['swap-bytes'] = False
 import os, subprocess, sys
 from subprocess import call
@@ -110,15 +110,17 @@ if p1.wait() == 0 and p2.wait() == 0 and b"can_isotp" in p2.stdout.read():
 
 = Import isotp
 conf.contribs['ISOTP'] = {'use-can-isotp-kernel-module': ISOTP_KERNEL_MODULE_AVAILABLE}
-load_contrib("isotp")
+
+if six.PY3:
+    import importlib
+    if "scapy.contrib.isotp" in sys.modules:
+        importlib.reload(scapy.contrib.isotp)
+
+load_contrib("isotp", globals_dict=globals())
 
 if six.PY3 and ISOTP_KERNEL_MODULE_AVAILABLE:
-    from scapy.contrib.isotp import ISOTPNativeSocket
-    ISOTPSocket = ISOTPNativeSocket
     assert ISOTPSocket == ISOTPNativeSocket
 else:
-    from scapy.contrib.isotp import ISOTPSoftSocket
-    ISOTPSocket = ISOTPSoftSocket
     assert ISOTPSocket == ISOTPSoftSocket
 
 
@@ -298,6 +300,44 @@ def test_isotpscan_text(sniff_time=0.02):
     assert "0x703" in result
     assert "No Padding" in result
 
+def test_isotpscan_text_padding(sniff_time=0.02):
+    semaphore = threading.Semaphore(0)
+    def isotpserver(i):
+        with new_can_socket0() as isocan, \
+                ISOTPSocket(isocan, sid=0x700 + i, did=0x600 + i, padding=True) as isotpsock:
+            isotpsock.sniff(timeout=1500 * sniff_time, count=1,
+                            started_callback=semaphore.release)
+    pkt = CAN(identifier=0x701, length=8,
+              data=b'\x01\x02\x03\x04\x05\x06\x07\x08')
+    thread_noise = threading.Thread(target=make_noise, args=(pkt, sniff_time,))
+    thread_noise.start()
+    thread1 = threading.Thread(target=isotpserver, args=(2,))
+    thread2 = threading.Thread(target=isotpserver, args=(3,))
+    thread1.start()
+    thread2.start()
+    semaphore.acquire()
+    semaphore.acquire()
+    with new_can_socket0() as scansock:
+        result = ISOTPScan(scansock, range(0x5ff, 0x604 + 1),
+                           output_format="text",
+                           noise_listen_time=sniff_time * 6,
+                           sniff_time=sniff_time,
+                           verbose=True)
+    with new_can_socket0() as cans:
+        cans.send(CAN(identifier=0x601, data=b'\x01\xaaffffff'))
+        cans.send(CAN(identifier=0x602, data=b'\x01\xaaffffff'))
+        cans.send(CAN(identifier=0x603, data=b'\x01\xaaffffff'))
+    thread1.join(timeout=10)
+    thread2.join(timeout=10)
+    thread_noise.join(timeout=10)
+    text = "\nFound 2 ISOTP-FlowControl Packet(s):"
+    assert text in result
+    assert "0x602" in result
+    assert "0x603" in result
+    assert "0x702" in result
+    assert "0x703" in result
+    assert "Padding enabled" in result
+
 
 def test_isotpscan_text_extended_can_id(sniff_time=0.02):
     semaphore = threading.Semaphore(0)
@@ -383,6 +423,43 @@ def test_isotpscan_code(sniff_time=0.02):
     print(result)
     assert s1 in result
     assert s2 in result
+
+
+def test_isotpscan_code_noise(sniff_time=0.02):
+    semaphore = threading.Semaphore(0)
+    def isotpserver(i):
+        with new_can_socket0() as isocan, \
+                ISOTPSocket(isocan, sid=0x700 + i, did=0x600 + i) as isotpsock:
+            isotpsock.sniff(timeout=1500 * sniff_time, count=1,
+                            started_callback=semaphore.release)
+    pkt = CAN(identifier=0x702, length=8,
+              data=b'\x01\x02\x03\x04\x05\x06\x07\x08')
+    thread_noise = threading.Thread(target=make_noise, args=(pkt, sniff_time,))
+    thread_noise.start()
+    thread1 = threading.Thread(target=isotpserver, args=(2,))
+    thread2 = threading.Thread(target=isotpserver, args=(3,))
+    thread1.start()
+    thread2.start()
+    semaphore.acquire()
+    semaphore.acquire()
+    with new_can_socket0() as scansock:
+        result = ISOTPScan(scansock, range(0x5ff, 0x603 + 1),
+                           output_format="code",
+                           noise_listen_time=sniff_time * 6,
+                           sniff_time=sniff_time,
+                           can_interface="can0",
+                           verbose=True)
+    with new_can_socket0() as cans:
+        cans.send(CAN(identifier=0x601, data=b'\x01\xaa'))
+        cans.send(CAN(identifier=0x603, data=b'\x01\xaa'))
+    thread1.join(timeout=10)
+    thread2.join(timeout=10)
+    thread_noise.join(timeout=10)
+    s2 = "ISOTPSocket(can0, sid=0x603, did=0x703, " \
+         "padding=False, basecls=ISOTP)\n"
+    print(result)
+    assert s2 in result
+
 
 
 def test_extended_isotpscan_code(sniff_time=0.02):
@@ -637,10 +714,15 @@ def test_isotpscan_none_random_ids(sniff_time=0.02):
     print(ids)
     semaphore = threading.Semaphore(0)
     def isotpserver(i):
-        with new_can_socket0() as isocan, \
-                ISOTPSocket(isocan, sid=0x100 + i, did=i) as s:
-            s.sniff(timeout=700 * sniff_time, count=1,
-                    started_callback=semaphore.release)
+        try:
+            with new_can_socket0() as isocan, \
+                    ISOTPSocket(isocan, sid=0x100 + i, did=i) as s:
+                s.sniff(timeout=1400 * sniff_time, count=1,
+                        started_callback=semaphore.release)
+            warning("ISOTPServer 0x%x finished" % i)
+        except Exception as e:
+            warning("ERROR in isotpserver 0x%x" % i)
+            warning(e)
     pkt = CAN(identifier=0x701, length=8, data=b'\x01\x02\x03\x04\x05\x06\x07\x08')
     thread_noise = threading.Thread(target=make_noise, args=(pkt, sniff_time,))
     threads = [threading.Thread(target=isotpserver, args=(x,)) for x in ids]
@@ -688,10 +770,13 @@ def test_isotpscan_none_random_ids_padding(sniff_time=0.02):
     ids = set(rnd._fix() for _ in range(10))
     semaphore = threading.Semaphore(0)
     def isotpserver(i):
-        with new_can_socket0() as isocan, \
-                ISOTPSocket(isocan, sid=0x100 + i, did=i, padding=True) as s:
-            s.sniff(timeout=700 * sniff_time, count=1,
-                    started_callback=semaphore.release)
+        try:
+            with new_can_socket0() as isocan, ISOTPSocket(isocan, sid=0x100 + i, did=i, padding=True) as s:
+                s.sniff(timeout=1400 * sniff_time, count=1, started_callback=semaphore.release)
+            warning("ISOTPServer 0x%x finished" % i)
+        except Exception as e:
+            warning("ERROR in isotpserver 0x%x" % i)
+            warning(e)
     pkt = CAN(identifier=0x701, length=8,
               data=b'\x01\x02\x03\x04\x05\x06\x07\x08')
     thread_noise = threading.Thread(target=make_noise, args=(pkt, sniff_time,))
@@ -748,6 +833,10 @@ test_dynamic(test_scan_extended)
 
 test_dynamic(test_isotpscan_text)
 
+= Test ISOTPScan with padding (output_format=text)
+
+test_dynamic(test_isotpscan_text_padding)
+
 = Test ISOTPScan(output_format=text) extended_can_id
 
 test_dynamic(test_isotpscan_text_extended_can_id)
@@ -755,6 +844,10 @@ test_dynamic(test_isotpscan_text_extended_can_id)
 = Test ISOTPScan(output_format=code)
 
 test_dynamic(test_isotpscan_code)
+
+= Test ISOTPScan with noise (output_format=code)
+
+test_dynamic(test_isotpscan_code_noise)
 
 = Test extended ISOTPScan(output_format=code)
 

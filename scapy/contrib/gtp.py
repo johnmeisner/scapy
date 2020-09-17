@@ -14,6 +14,7 @@ import struct
 
 
 from scapy.compat import chb, orb, bytes_encode
+from scapy.config import conf
 from scapy.error import warning
 from scapy.fields import BitEnumField, BitField, ByteEnumField, ByteField, \
     ConditionalField, FieldLenField, FieldListField, FlagsField, IntField, \
@@ -221,9 +222,16 @@ class GTPHeader(Packet):
                    ByteEnumField("gtp_type", None, GTPmessageType),
                    ShortField("length", None),
                    IntField("teid", 0),
-                   ConditionalField(XBitField("seq", 0, 16), lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),  # noqa: E501
-                   ConditionalField(ByteField("npdu", 0), lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),  # noqa: E501
-                   ConditionalField(ByteEnumField("next_ex", 0, ExtensionHeadersTypes), lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1), ]  # noqa: E501
+                   ConditionalField(
+                       XBitField("seq", 0, 16),
+                       lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),
+                   ConditionalField(
+                       ByteField("npdu", 0),
+                       lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),
+                   ConditionalField(
+                       ByteEnumField("next_ex", 0, ExtensionHeadersTypes),
+                       lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),
+                   ]
 
     def post_build(self, p, pay):
         p += pay
@@ -233,11 +241,15 @@ class GTPHeader(Packet):
         return p
 
     def hashret(self):
-        return struct.pack("B", self.version) + self.payload.hashret()
+        hsh = struct.pack("B", self.version)
+        if self.seq:
+            hsh += struct.pack("H", self.seq)
+        return hsh + self.payload.hashret()
 
     def answers(self, other):
         return (isinstance(other, GTPHeader) and
                 self.version == other.version and
+                (not self.seq or self.seq == other.seq) and
                 self.payload.answers(other.payload))
 
     @classmethod
@@ -311,6 +323,11 @@ class GTPPDUSessionContainer(Packet):
                                     lambda pkt: pkt.P == 1),
                    ConditionalField(ByteField("pad3", 0),
                                     lambda pkt: pkt.P == 1),
+                   ConditionalField(StrLenField(
+                       "extraPadding",
+                       "",
+                       length_from=lambda pkt: 4 * (pkt.ExtHdrLen) - 4),
+                       lambda pkt: pkt.ExtHdrLen and pkt.ExtHdrLen > 1),
                    ByteEnumField("NextExtHdr", 0, ExtensionHeadersTypes), ]
 
     def guess_payload_class(self, payload):
@@ -334,22 +351,24 @@ class GTPPDUSessionContainer(Packet):
             p = struct.pack("!B", hdr_len) + p[1:]
         return p
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
 
 class GTPEchoRequest(Packet):
     # 3GPP TS 29.060 V9.1.0 (2009-12)
     name = "GTP Echo Request"
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
 
 class IE_Base(Packet):
-
     def extract_padding(self, pkt):
         return "", pkt
+
+    def post_build(self, p, pay):
+        if self.fields_desc[1].name == "length":
+            if self.length is None:
+                tmp_len = len(p)
+                if isinstance(self.payload, conf.padding_layer):
+                    tmp_len += len(self.payload.load)
+                p = p[:1] + struct.pack("!H", tmp_len - 2) + p[3:]
+        return p + pay
 
 
 class IE_Cause(IE_Base):
@@ -854,11 +873,8 @@ class GTPEchoResponse(Packet):
     name = "GTP Echo Response"
     fields_desc = [PacketListField("IE_list", [], IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
     def answers(self, other):
-        return self.seq == other.seq
+        return isinstance(other, GTPEchoRequest)
 
 
 class GTPCreatePDPContextRequest(Packet):
@@ -869,20 +885,14 @@ class GTPCreatePDPContextRequest(Packet):
                                                IE_NotImplementedTLV(ietype=135, length=15, data=RandString(15))],  # noqa: E501
                                    IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
 
 class GTPCreatePDPContextResponse(Packet):
     # 3GPP TS 29.060 V9.1.0 (2009-12)
     name = "GTP Create PDP Context Response"
     fields_desc = [PacketListField("IE_list", [], IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
     def answers(self, other):
-        return self.seq == other.seq
+        return isinstance(other, GTPCreatePDPContextRequest)
 
 
 class GTPUpdatePDPContextRequest(Packet):
@@ -910,17 +920,14 @@ class GTPUpdatePDPContextRequest(Packet):
         IE_PrivateExtension()],
         IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
 
 class GTPUpdatePDPContextResponse(Packet):
     # 3GPP TS 29.060 V9.1.0 (2009-12)
     name = "GTP Update PDP Context Response"
     fields_desc = [PacketListField("IE_list", None, IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
+    def answers(self, other):
+        return isinstance(other, GTPUpdatePDPContextRequest)
 
 
 class GTPErrorIndication(Packet):

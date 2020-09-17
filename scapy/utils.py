@@ -891,7 +891,10 @@ def load_object(fname):
 
 @conf.commands.register
 def corrupt_bytes(s, p=0.01, n=None):
-    """Corrupt a given percentage or number of bytes from a string"""
+    """
+    Corrupt a given percentage (at least one byte) or number of bytes
+    from a string
+    """
     s = array.array("B", bytes_encode(s))
     s_len = len(s)
     if n is None:
@@ -903,7 +906,10 @@ def corrupt_bytes(s, p=0.01, n=None):
 
 @conf.commands.register
 def corrupt_bits(s, p=0.01, n=None):
-    """Flip a given percentage or number of bits from a string"""
+    """
+    Flip a given percentage (at least one bit) or number of bits
+    from a string
+    """
     s = array.array("B", bytes_encode(s))
     s_len = len(s) * 8
     if n is None:
@@ -965,6 +971,10 @@ class PcapReader_metaclass(type):
         """
         i = cls.__new__(cls, cls.__name__, cls.__bases__, cls.__dict__)
         filename, fdesc, magic = cls.open(filename)
+        if not magic:
+            raise Scapy_Exception(
+                "No data could be read!"
+            )
         try:
             i.__init__(filename, fdesc, magic)
         except Scapy_Exception:
@@ -1002,7 +1012,6 @@ class PcapReader_metaclass(type):
 class RawPcapReader(six.with_metaclass(PcapReader_metaclass)):
     """A stateful pcap reader. Each packet is returned as a string"""
 
-    read_allowed_exceptions = ()  # emulate SuperSocket
     nonblocking_socket = True
     PacketMetadata = collections.namedtuple("PacketMetadata",
                                             ["sec", "usec", "wirelen", "caplen"])  # noqa: E501
@@ -1117,6 +1126,9 @@ class PcapReader(RawPcapReader):
             self.LLcls = conf.l2types[self.linktype]
         except KeyError:
             warning("PcapReader: unknown LL type [%i]/[%#x]. Using Raw packets" % (self.linktype, self.linktype))  # noqa: E501
+            if conf.raw_layer is None:
+                # conf.raw_layer is set on import
+                import scapy.packet  # noqa: F401
             self.LLcls = conf.raw_layer
 
     def read_packet(self, size=MTU):
@@ -1134,6 +1146,9 @@ class PcapReader(RawPcapReader):
                 from scapy.sendrecv import debug
                 debug.crashed_on = (self.LLcls, s)
                 raise
+            if conf.raw_layer is None:
+                # conf.raw_layer is set on import
+                import scapy.packet  # noqa: F401
             p = conf.raw_layer(s)
         power = Decimal(10) ** Decimal(-9 if self.nano else -6)
         p.time = EDecimal(pkt_info.sec + power * pkt_info.usec)
@@ -1219,6 +1234,7 @@ class RawPcapNgReader(RawPcapReader):
                 if (blocklen,) != struct.unpack(self.endian + 'I',
                                                 self.f.read(4)):
                     warning("PcapNg: Invalid pcapng block (bad blocklen)")
+                    raise EOFError
             except struct.error:
                 raise EOFError
             res = self.blocktypes.get(blocktype,
@@ -1315,6 +1331,9 @@ class PcapNgReader(RawPcapNgReader):
         except Exception:
             if conf.debug_dissector:
                 raise
+            if conf.raw_layer is None:
+                # conf.raw_layer is set on import
+                import scapy.packet  # noqa: F401
             p = conf.raw_layer(s)
         if tshigh is not None:
             p.time = EDecimal((tshigh << 32) + tslow) / tsresol
@@ -1404,7 +1423,13 @@ class RawPcapWriter:
             # Import here to avoid a circular dependency
             from scapy.plist import SndRcvList
             if isinstance(pkt, SndRcvList):
-                pkt = (p for t in pkt for p in t)
+                def _iter(pkt=pkt):
+                    for s, r in pkt:
+                        if s.sent_time:
+                            s.time = s.sent_time
+                        yield s
+                        yield r
+                pkt = _iter()
             else:
                 pkt = pkt.__iter__()
             for p in pkt:
@@ -1620,7 +1645,7 @@ def _guess_linktype_value(name):
 
 
 @conf.commands.register
-def tcpdump(pktlist=None, dump=False, getfd=False, args=None,
+def tcpdump(pktlist=None, dump=False, getfd=False, args=None, flt=None,
             prog=None, getproc=False, quiet=False, use_tempfile=None,
             read_stdin_opts=None, linktype=None, wait=True,
             _suppress=False):
@@ -1648,7 +1673,7 @@ def tcpdump(pktlist=None, dump=False, getfd=False, args=None,
         Packet instances. Can also be a filename (as a string), an open
         file-like object that must be a file format readable by
         tshark (Pcap, PcapNg, etc.) or None (to sniff)
-
+    :param flt: a filter to use with tcpdump
     :param dump:    when set to True, returns a string instead of displaying it.
     :param getfd:   when set to True, returns a file-like object to read data
         from tcpdump or tshark from.
@@ -1750,6 +1775,12 @@ def tcpdump(pktlist=None, dump=False, getfd=False, args=None,
         # Make a copy of args
         args = list(args)
 
+    if flt is not None:
+        # Check the validity of the filter
+        from scapy.arch.common import compile_filter
+        compile_filter(flt)
+        args.append(flt)
+
     stdout = subprocess.PIPE if dump or getfd else None
     stderr = open(os.devnull) if quiet else None
     proc = None
@@ -1763,6 +1794,9 @@ def tcpdump(pktlist=None, dump=False, getfd=False, args=None,
         if prog[0] == conf.prog.wireshark:
             # Start capturing immediately (-k) from stdin (-i -)
             read_stdin_opts = ["-ki", "-"]
+        elif prog[0] == conf.prog.tcpdump:
+            # Capture in packet-buffered mode (-U) from stdin (-r -)
+            read_stdin_opts = ["-U", "-r", "-"]
         else:
             read_stdin_opts = ["-r", "-"]
     else:
@@ -1800,26 +1834,37 @@ def tcpdump(pktlist=None, dump=False, getfd=False, args=None,
                 stderr=stderr,
             )
     else:
-        # pass the packet stream
-        with ContextManagerSubprocess(prog[0], suppress=_suppress):
-            proc = subprocess.Popen(
-                prog + read_stdin_opts + args,
-                stdin=subprocess.PIPE,
-                stdout=stdout,
-                stderr=stderr,
-            )
+        try:
+            pktlist.fileno()
+            # pass the packet stream
+            with ContextManagerSubprocess(prog[0], suppress=_suppress):
+                proc = subprocess.Popen(
+                    prog + read_stdin_opts + args,
+                    stdin=pktlist,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+        except (AttributeError, ValueError):
+            # write the packet stream to stdin
+            with ContextManagerSubprocess(prog[0], suppress=_suppress):
+                proc = subprocess.Popen(
+                    prog + read_stdin_opts + args,
+                    stdin=subprocess.PIPE,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
             if proc is None:
                 # An error has occurred
                 return
-        try:
-            proc.stdin.writelines(iter(lambda: pktlist.read(1048576), b""))
-        except AttributeError:
-            wrpcap(proc.stdin, pktlist, linktype=linktype)
-        except UnboundLocalError:
-            # The error was handled by ContextManagerSubprocess
-            pass
-        else:
-            proc.stdin.close()
+            try:
+                proc.stdin.writelines(iter(lambda: pktlist.read(1048576), b""))
+            except AttributeError:
+                wrpcap(proc.stdin, pktlist, linktype=linktype)
+            except UnboundLocalError:
+                # The error was handled by ContextManagerSubprocess
+                pass
+            else:
+                proc.stdin.close()
     if proc is None:
         # An error has occurred
         return

@@ -269,7 +269,7 @@ class _IPv6GuessPayload:
 class IPv6(_IPv6GuessPayload, Packet, IPTools):
     name = "IPv6"
     fields_desc = [BitField("version", 6, 4),
-                   BitField("tc", 0, 8),  # TODO: IPv6, ByteField ?
+                   BitField("tc", 0, 8),
                    BitField("fl", 0, 20),
                    ShortField("plen", None),
                    ByteEnumField("nh", 59, ipv6nh),
@@ -1022,6 +1022,12 @@ class IPv6ExtHdrFragment(_IPv6ExtHdr):
                    IntField("id", None)]
     overload_fields = {IPv6: {"nh": 44}}
 
+    def guess_payload_class(self, p):
+        if self.offset > 0:
+            return Raw
+        else:
+            return super(IPv6ExtHdrFragment, self).guess_payload_class(p)
+
 
 def defragment6(packets):
     """
@@ -1065,7 +1071,7 @@ def defragment6(packets):
         fragmentable += raw(q.payload)
 
     # Regenerate the unfragmentable part.
-    q = res[0]
+    q = res[0].copy()
     nh = q[IPv6ExtHdrFragment].nh
     q[IPv6ExtHdrFragment].underlayer.nh = nh
     q[IPv6ExtHdrFragment].underlayer.plen = len(fragmentable)
@@ -1073,26 +1079,40 @@ def defragment6(packets):
     q /= conf.raw_layer(load=fragmentable)
     del(q.plen)
 
-    return IPv6(raw(q))
+    if q[IPv6].underlayer:
+        q[IPv6] = IPv6(raw(q[IPv6]))
+    else:
+        q = IPv6(raw(q))
+    return q
 
 
 def fragment6(pkt, fragSize):
     """
-    Performs fragmentation of an IPv6 packet. Provided packet ('pkt') must
-    already contain an IPv6ExtHdrFragment() class. 'fragSize' argument is the
-    expected maximum size of fragments (MTU). The list of packets is returned.
+    Performs fragmentation of an IPv6 packet. 'fragSize' argument is the
+    expected maximum size of fragment data (MTU). The list of packets is
+    returned.
 
-    If packet does not contain an IPv6ExtHdrFragment class, it is returned in
-    result list.
+    If packet does not contain an IPv6ExtHdrFragment class, it is added to
+    first IPv6 layer found. If no IPv6 layer exists packet is returned in
+    result list unmodified.
     """
 
     pkt = pkt.copy()
 
     if IPv6ExtHdrFragment not in pkt:
-        # TODO : automatically add a fragment before upper Layer
-        #        at the moment, we do nothing and return initial packet
-        #        as single element of a list
-        return [pkt]
+        if IPv6 not in pkt:
+            return [pkt]
+
+        layer3 = pkt[IPv6]
+        data = layer3.payload
+        frag = IPv6ExtHdrFragment(nh=layer3.nh)
+
+        layer3.remove_payload()
+        del(layer3.nh)
+        del(layer3.plen)
+
+        frag.add_payload(data)
+        layer3.add_payload(frag)
 
     # If the payload is bigger than 65535, a Jumbo payload must be used, as
     # an IPv6 packet can't be bigger than 65535 bytes.
@@ -1202,6 +1222,8 @@ icmp6typescls = {1: "ICMPv6DestUnreach",
                  151: "ICMPv6MRD_Advertisement",
                  152: "ICMPv6MRD_Solicitation",
                  153: "ICMPv6MRD_Termination",
+                 # 154: Do Me - FMIPv6 Messages - RFC 5568
+                 155: "ICMPv6RPL",  # RFC 6550
                  }
 
 icmp6typesminhdrlen = {1: 8,
@@ -1229,7 +1251,8 @@ icmp6typesminhdrlen = {1: 8,
                        147: 8,
                        151: 8,
                        152: 4,
-                       153: 4
+                       153: 4,
+                       155: 4
                        }
 
 icmp6types = {1: "Destination unreachable",
@@ -1263,6 +1286,7 @@ icmp6types = {1: "Destination unreachable",
               151: "Multicast Router Advertisement",
               152: "Multicast Router Solicitation",
               153: "Multicast Router Termination",
+              155: "RPL Control Message",
               200: "Private Experimentation",
               201: "Private Experimentation"}
 
@@ -2598,6 +2622,32 @@ def _niquery_guesser(p):
         elif code == 2:
             cls = ICMPv6NIReplyUnknown
     return cls
+
+
+#############################################################################
+#############################################################################
+#     Routing Protocol for Low Power and Lossy Networks RPL (RFC 6550)      #
+#############################################################################
+#############################################################################
+
+# https://www.iana.org/assignments/rpl/rpl.xhtml#control-codes
+rplcodes = {0: "DIS",
+            1: "DIO",
+            2: "DAO",
+            3: "DAO-ACK",
+            # 4: "P2P-DRO",
+            # 5: "P2P-DRO-ACK",
+            # 6: "Measurement",
+            7: "DCO",
+            8: "DCO-ACK"}
+
+
+class ICMPv6RPL(_ICMPv6):   # RFC 6550
+    name = 'RPL'
+    fields_desc = [ByteEnumField("type", 155, icmp6types),
+                   ByteEnumField("code", 0, rplcodes),
+                   XShortField("cksum", None)]
+    overload_fields = {IPv6: {"nh": 58, "dst": "ff02::1a"}}
 
 
 #############################################################################

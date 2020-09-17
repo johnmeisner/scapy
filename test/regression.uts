@@ -127,6 +127,15 @@ except:
 
 assert not conf.use_bpf
 
+if not conf.use_pcap:
+    a = six.moves.builtins.__dict__
+    conf.interactive = True
+    conf.use_pcap = True
+    assert a["get_if_list"] == scapy.arch.pcapdnet.get_if_list
+    conf.use_pcap = False
+    assert a["get_if_list"] == scapy.arch.linux.get_if_list
+    conf.interactive = False
+
 = Configuration conf.use_* WINDOWS
 ~ windows
 
@@ -681,6 +690,29 @@ b.lookup("00:00:00") == ('JokyIsland', 'Joky Insland Corp SA'),
 b.lookup("FF:00:11:00:00:00") == ('NoName', 'NoName')
 b.reverse_lookup("Scapy") == {'EE:05:01': ('Scapy', 'Scapy CO LTD & CIE')}
 b.reverse_lookup("Secdevcorp") == {'00:01:12': ('SecdevCorp', 'Secdev Corporation SA LLC')}
+
+scapy_delete_temp_files()
+
+= Test load_services
+
+data_services = """
+cvsup		5999/udp			# CVSup
+x11		6000-6063/tcp			# X Window System
+x11		6000-6063/udp			# X Window System
+ndl-ahp-svc	6064/tcp			# NDL-AHP-SVC
+"""
+
+services = get_temp_file()
+with open(services, "w") as w:
+    w.write(data_services)
+
+tcp, udp = load_services(services)
+assert tcp[6002] == "x11"
+assert tcp.ndl_ahp_svc == 6064
+assert tcp.x11 in range(6000, 6093)
+assert udp[6002] == "x11"
+assert udp.x11 in range(6000, 6093)
+assert udp.cvsup == 5999
 
 scapy_delete_temp_files()
 
@@ -1279,7 +1311,7 @@ assert Dot11FCS in radiotap
 assert radiotap.fcs == 0xdbc04908
 
 assert Dot11EltRates in radiotap
-assert radiotap[Dot11EltRates].rates == [0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c]
+assert radiotap[Dot11EltRates].rates == [130, 132, 139, 150, 36, 48, 72, 108]
 
 = RadioTap - Build with Extended presence mask
 
@@ -1292,6 +1324,26 @@ assert raw(pkt) == b'\x00\x00\x10\x00\x00\x00\x00\x80\x01\x10\x00\xa0\x01 \x00H'
 for i in range(10):
     assert isinstance(raw(fuzz(Dot11Elt())), bytes)
 
+= PMKIDListPacket - Check computation of nb_pmkids
+assert PMKIDListPacket(raw(PMKIDListPacket())).nb_pmkids == 0
+assert PMKIDListPacket(raw(PMKIDListPacket(pmkid_list=["AZEDFREZSDERFGTY"]))).nb_pmkids == 1
+assert PMKIDListPacket(raw(PMKIDListPacket(pmkid_list=["0123456789ABDEFX", "AZEDFREZSDERFGTY"]))).nb_pmkids == 2
+
+= Dot11EltRSN - Check computation of nb_pairwise_cipher_suites and nb_akm_suites 
+assert Dot11EltRSN(raw(Dot11EltRSN())).nb_pairwise_cipher_suites == 1 
+assert Dot11EltRSN(raw(Dot11EltRSN(pairwise_cipher_suites=[RSNCipherSuite(cipher="TKIP")]))).nb_pairwise_cipher_suites == 1 
+assert Dot11EltRSN(raw(Dot11EltRSN(pairwise_cipher_suites=[RSNCipherSuite(cipher="TKIP"), RSNCipherSuite(cipher="CCMP-128")]))).nb_pairwise_cipher_suites == 2 
+assert Dot11EltRSN(raw(Dot11EltRSN())).nb_akm_suites == 1
+assert Dot11EltRSN(raw(Dot11EltRSN(akm_suites=[AKMSuite(suite="PSK")]))).nb_akm_suites == 1
+assert Dot11EltRSN(raw(Dot11EltRSN(akm_suites=[AKMSuite(suite="PSK"), AKMSuite(suite="802.1X")]))).nb_akm_suites == 2
+
+= Dot11EltMicrosoftWPA - Check computation of nb_pairwise_cipher_suites and nb_akm_suites 
+assert Dot11EltMicrosoftWPA(raw(Dot11EltMicrosoftWPA())).nb_pairwise_cipher_suites == 1
+assert Dot11EltMicrosoftWPA(raw(Dot11EltMicrosoftWPA(pairwise_cipher_suites=[RSNCipherSuite(cipher="TKIP")]))).nb_pairwise_cipher_suites == 1
+assert Dot11EltMicrosoftWPA(raw(Dot11EltMicrosoftWPA(pairwise_cipher_suites=[RSNCipherSuite(cipher="TKIP"), RSNCipherSuite(cipher="CCMP-128")]))).nb_pairwise_cipher_suites == 2
+assert Dot11EltMicrosoftWPA(raw(Dot11EltMicrosoftWPA())).nb_akm_suites == 1
+assert Dot11EltMicrosoftWPA(raw(Dot11EltMicrosoftWPA(akm_suites=[AKMSuite(suite="PSK")]))).nb_akm_suites == 1
+assert Dot11EltMicrosoftWPA(raw(Dot11EltMicrosoftWPA(akm_suites=[AKMSuite(suite="PSK"), AKMSuite(suite="802.1X")]))).nb_akm_suites == 2
 
 ############
 ############
@@ -1409,6 +1461,27 @@ raw(RandASN1Object())
 # ASN1F_UTC_TIME & ASN1F_GENERALIZED_TIME
 random.seed(1873503288)
 raw(RandASN1Object())
+
+= SSID is parsed properly even with the presence of RSN Information
+~ SSID RSN Information
+# A regression test for https://github.com/secdev/scapy/pull/2685.
+# https://github.com/secdev/scapy/issues/2683 describes a packet with
+# RSN Information that isn't parsed properly,
+# causing the SSID to be overridden.
+# This test checks the SSID is parsed properly.
+print(os.path.dirname(__file__))
+filename = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "test",
+        "pcaps",
+        "bad_rsn_parsing_overrides_ssid.pcap"
+    ))
+frame = rdpcap(filename)[0]
+beacon = frame.getlayer(5)
+ssid = beacon.network_stats()['ssid']
+assert ssid == "ROUTE-821E295"
 
 
 ############
@@ -2336,6 +2409,12 @@ assert(r == b'\x00')
 r = raw(IPOption_LSRR(routers=["1.2.3.4","5.6.7.8"]))
 r
 assert(r == b'\x83\x0b\x04\x01\x02\x03\x04\x05\x06\x07\x08')
+r = raw(IPOption_Timestamp(internet_address='192.168.15.7', timestamp=11223344))
+r
+assert(r == b'D\x0c\t\x01\xc0\xa8\x0f\x07\x00\xabA0')
+r = raw(IPOption_Timestamp(flg=0, length=8))
+r
+assert(r == b'D\x08\t\x00\x00\x00\x00\x00')
 
 = IP options individual dissection
 ~ IP options
@@ -4213,6 +4292,10 @@ a.hashret() == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0
 l=fragment6(IPv6()/IPv6ExtHdrFragment()/TCP()/Raw(load="A"*40000), 1280) 
 len(l) == 33 and len(raw(l[-1])) == 644
 
+= fragment6 - test against a long TCP packet with a 1280 MTU without fragment header
+l=fragment6(IPv6()/TCP()/Raw(load="A"*40000), 1280)
+len(l) == 33 and len(raw(l[-1])) == 644
+
 
 ############
 ############
@@ -4221,6 +4304,11 @@ len(l) == 33 and len(raw(l[-1])) == 644
 = defragment6 - test against a long TCP packet fragmented with a 1280 MTU
 l=fragment6(IPv6()/IPv6ExtHdrFragment()/TCP()/Raw(load="A"*40000), 1280) 
 raw(defragment6(l)) == (b'`\x00\x00\x00\x9cT\x06@\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x14\x00P\x00\x00\x00\x00\x00\x00\x00\x00P\x02 \x00\xe92\x00\x00' + b'A'*40000)
+
+
+= defragment6 - test against packets with L2 header
+l=defragment6(fragment6(Ether()/IPv6()/IPv6ExtHdrFragment()/TCP()/Raw(load="A"*2000), 1280))
+Ether in l
 
 
 = defragment6 - test against a large TCP packet fragmented with a 1280 bytes MTU and missing fragments
@@ -4848,7 +4936,7 @@ raw(DHCP6OptIAAddress()) == b'\x00\x05\x00\x18\x00\x00\x00\x00\x00\x00\x00\x00\x
 
 = DHCP6OptIAAddress - Basic Dissection
 a = DHCP6OptIAAddress(b'\x00\x05\x00\x18\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
-a.optcode == 5 and a.optlen == 24 and a.addr == "::" and a.preflft == 0 and a. validlft == 0 and a.iaaddropts == b""
+a.optcode == 5 and a.optlen == 24 and a.addr == "::" and a.preflft == 0 and a. validlft == 0 and a.iaaddropts == []
 
 = DHCP6OptIAAddress - Instantiation with specific values
 raw(DHCP6OptIAAddress(optlen=0x1111, addr="2222:3333::5555", preflft=0x66666666, validlft=0x77777777, iaaddropts="somestring")) == b'\x00\x05\x11\x11""33\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00UUffffwwwwsomestring'
@@ -4858,7 +4946,7 @@ raw(DHCP6OptIAAddress(addr="2222:3333::5555", preflft=0x66666666, validlft=0x777
 
 = DHCP6OptIAAddress - Dissection with specific values 
 a = DHCP6OptIAAddress(b'\x00\x05\x00"""33\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00UUffffwwwwsomerawing')
-a.optcode == 5 and a.optlen == 34 and a.addr == "2222:3333::5555" and a.preflft == 0x66666666 and a. validlft == 0x77777777 and a.iaaddropts == b"somerawing"
+a.optcode == 5 and a.optlen == 34 and a.addr == "2222:3333::5555" and a.preflft == 0x66666666 and a. validlft == 0x77777777 and a.iaaddropts[0].load == b"somerawing"
 
 
 ############
@@ -5353,18 +5441,18 @@ a.optcode == 28 and a.optlen == 32 and len(a.nispservers) == 2 and a.nispservers
 + Test DHCP6 Option - NIS Domain Name
 
 = DHCP6OptNISDomain - Basic Instantiation
-raw(DHCP6OptNISDomain()) == b'\x00\x1d\x00\x00'
+raw(DHCP6OptNISDomain()) == b'\x00\x1d\x00\x01\x00'
 
 = DHCP6OptNISDomain - Basic Dissection
 a = DHCP6OptNISDomain(b'\x00\x1d\x00\x00')
-a.optcode == 29 and a.optlen == 0 and a.nisdomain == b""
+a.optcode == 29 and a.optlen == 0 and a.nisdomain == b"."
 
 = DHCP6OptNISDomain - Instantiation with one domain name
-raw(DHCP6OptNISDomain(nisdomain="toto.example.org")) == b'\x00\x1d\x00\x11\x04toto\x07example\x03org'
+raw(DHCP6OptNISDomain(nisdomain="toto.example.org")) == b'\x00\x1d\x00\x12\x04toto\x07example\x03org\x00'
 
 = DHCP6OptNISDomain - Dissection with one domain name
 a = DHCP6OptNISDomain(b'\x00\x1d\x00\x11\x04toto\x07example\x03org\x00')
-a.optcode == 29 and a.optlen == 17 and a.nisdomain == b"toto.example.org"
+a.optcode == 29 and a.optlen == 17 and a.nisdomain == b"toto.example.org."
 
 = DHCP6OptNISDomain - Instantiation with one domain with trailing dot
 raw(DHCP6OptNISDomain(nisdomain="toto.example.org.")) == b'\x00\x1d\x00\x12\x04toto\x07example\x03org\x00'
@@ -5375,18 +5463,18 @@ raw(DHCP6OptNISDomain(nisdomain="toto.example.org.")) == b'\x00\x1d\x00\x12\x04t
 + Test DHCP6 Option - NIS+ Domain Name
 
 = DHCP6OptNISPDomain - Basic Instantiation
-raw(DHCP6OptNISPDomain()) == b'\x00\x1e\x00\x00'
+raw(DHCP6OptNISPDomain()) == b'\x00\x1e\x00\x01\x00'
 
 = DHCP6OptNISPDomain - Basic Dissection
 a = DHCP6OptNISPDomain(b'\x00\x1e\x00\x00')
-a.optcode == 30 and a.optlen == 0 and a.nispdomain == b""
+a.optcode == 30 and a.optlen == 0 and a.nispdomain == b"."
 
 = DHCP6OptNISPDomain - Instantiation with one domain name
-raw(DHCP6OptNISPDomain(nispdomain="toto.example.org")) == b'\x00\x1e\x00\x11\x04toto\x07example\x03org'
+raw(DHCP6OptNISPDomain(nispdomain="toto.example.org")) == b'\x00\x1e\x00\x12\x04toto\x07example\x03org\x00'
 
 = DHCP6OptNISPDomain - Dissection with one domain name
-a = DHCP6OptNISPDomain(b'\x00\x1e\x00\x11\x04toto\x07example\x03org\x00')
-a.optcode == 30 and a.optlen == 17 and a.nispdomain == b"toto.example.org"
+a = DHCP6OptNISPDomain(b'\x00\x1e\x00\x12\x04toto\x07example\x03org\x00')
+a.optcode == 30 and a.optlen == 18 and a.nispdomain == b"toto.example.org."
 
 = DHCP6OptNISPDomain - Instantiation with one domain with trailing dot
 raw(DHCP6OptNISPDomain(nispdomain="toto.example.org.")) == b'\x00\x1e\x00\x12\x04toto\x07example\x03org\x00'
@@ -5526,21 +5614,21 @@ a.optcode == 38 and a.optlen == 6 and a.subscriberid == b"someid"
 + Test DHCP6 Option - Client FQDN
 
 = DHCP6OptClientFQDN - Basic Instantiation
-raw(DHCP6OptClientFQDN()) == b"\x00'\x00\x01\x00"
+raw(DHCP6OptClientFQDN()) == b"\x00'\x00\x02\x00\x00"
 
 = DHCP6OptClientFQDN - Basic Dissection
 a = DHCP6OptClientFQDN(b"\x00'\x00\x01\x00")
-a.optcode == 39 and a.optlen == 1 and a.res == 0 and a.flags == 0 and a.fqdn == b""
+a.optcode == 39 and a.optlen == 1 and a.res == 0 and a.flags == 0 and a.fqdn == b"."
 
 = DHCP6OptClientFQDN - Instantiation with various flags combinations
-raw(DHCP6OptClientFQDN(flags="S")) == b"\x00'\x00\x01\x01" and raw(DHCP6OptClientFQDN(flags="O")) == b"\x00'\x00\x01\x02" and raw(DHCP6OptClientFQDN(flags="N")) == b"\x00'\x00\x01\x04" and raw(DHCP6OptClientFQDN(flags="SON")) == b"\x00'\x00\x01\x07" and raw(DHCP6OptClientFQDN(flags="ON")) == b"\x00'\x00\x01\x06"
+raw(DHCP6OptClientFQDN(flags="S")) == b"\x00'\x00\x02\x01\x00" and raw(DHCP6OptClientFQDN(flags="O")) == b"\x00'\x00\x02\x02\x00" and raw(DHCP6OptClientFQDN(flags="N")) == b"\x00'\x00\x02\x04\x00" and raw(DHCP6OptClientFQDN(flags="SON")) == b"\x00'\x00\x02\x07\x00" and raw(DHCP6OptClientFQDN(flags="ON")) == b"\x00'\x00\x02\x06\x00"
 
 = DHCP6OptClientFQDN - Instantiation with one fqdn 
-raw(DHCP6OptClientFQDN(fqdn="toto.example.org")) == b"\x00'\x00\x12\x00\x04toto\x07example\x03org"
+raw(DHCP6OptClientFQDN(fqdn="toto.example.org")) == b"\x00'\x00\x13\x00\x04toto\x07example\x03org\x00"
 
 = DHCP6OptClientFQDN - Dissection with one fqdn 
 a = DHCP6OptClientFQDN(b"\x00'\x00\x12\x00\x04toto\x07example\x03org\x00")
-a.optcode == 39 and a.optlen == 18 and a.res == 0 and a.flags == 0 and a.fqdn == b"toto.example.org"
+a.optcode == 39 and a.optlen == 18 and a.res == 0 and a.flags == 0 and a.fqdn == b"toto.example.org."
 
 
 ############
@@ -7050,6 +7138,17 @@ assert newpktpcapwirelen[0].wirelen is not None
 assert len(newpktpcapwirelen[0]) < newpktpcapwirelen[0].wirelen
 assert newpktpcapwirelen[0].wirelen == pktpcapwirelen[0].wirelen
 
+= Check wrpcap() then rdpcap() with sent_time on SndRcvList
+f = get_temp_file()
+s = Ether()/IP()
+r = Ether()/IP()
+s.sent_time = 1
+r.time = 2
+wrpcap(f, SndRcvList([(s, r)]))
+pcap = rdpcap(f)
+assert pcap[0].time == 1
+assert pcap[1].time == 2
+
 = Check wrpcap()
 fdesc, filename = tempfile.mkstemp()
 fdesc = os.fdopen(fdesc, "wb")
@@ -7091,6 +7190,16 @@ assert(all(UDP in p for p in l))
 
 l = sniff(offline=IP()/UDP(sport=(10000, 10001)), filter="tcp")
 assert len(l) == 0
+
+= Check offline sniff() with Packets, tcpdump and a bad filter
+~ tcpdump
+
+try:
+    sniff(offline=IP()/UDP(), filter="bad filter")
+except Scapy_Exception:
+    pass
+else:
+    assert False
 
 = Check offline sniff with lfilter
 assert len(sniff(offline=[IP()/UDP(), IP()/TCP()], lfilter=lambda x: TCP in x)) == 1
@@ -7159,6 +7268,12 @@ pkt = pkt.payload
 assert isinstance(pkt, Padding) and pkt.load == b'\xeay$\xf6'
 pkt = pkt.payload
 assert isinstance(pkt, NoPayload)
+
+= Invalid pcapng file
+
+from io import BytesIO
+invalid_pcapngfile = BytesIO(b'\n\r\r\n\r\x00\x00\x00M<+\x1a\xb2<\xb2\xa1\x01\x00\x00\x00\r\x00\x00\x00M<+\x1a\x80\xaa\xb2\x02')
+assert(len(rdpcap(invalid_pcapngfile)) == 0)
 
 = Check PcapWriter on null write
 
@@ -7257,7 +7372,7 @@ with mock.patch('subprocess.Popen', return_value=Bunch(
         tcpdump([pkt], linktype="DLT_EN3MB", use_tempfile=False)
 
 popen.assert_called_once_with(
-    [conf.prog.tcpdump, '-y', 'EN3MB', '-r', '-'],
+    [conf.prog.tcpdump, '-y', 'EN3MB', '-U', '-r', '-'],
     stdin=subprocess.PIPE, stdout=None, stderr=None)
 
 print(bytes_hex(f.getvalue()))
@@ -7278,7 +7393,7 @@ with mock.patch('subprocess.Popen', return_value=Bunch(
         tcpdump([pkt], linktype=scapy.data.DLT_EN10MB, use_tempfile=False)
 
 popen.assert_called_once_with(
-    [conf.prog.tcpdump, '-y', 'EN10MB', '-r', '-'],
+    [conf.prog.tcpdump, '-y', 'EN10MB', '-U', '-r', '-'],
     stdin=subprocess.PIPE, stdout=None, stderr=None)
 
 print(bytes_hex(f.getvalue()))
@@ -7573,6 +7688,7 @@ assert HTTPResponse in pkts[2]
 assert pkts[2].load == b'<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><html><head><title></title></head><body style="background-color: transparent"><img src=\'https://pixel.mathtag.com/event/img?mt_id=151466&mt_adid=106144&v1=&v2=&v3=&s1=&s2=&s3=&ord=2047279765\' width=\'1\' height=\'1\' /><img src="https://adservice.google.com/ddm/fls/z/src=3656617;type=hpvisit;cat=homep198;u2=;u6=;u5=;u4=;u3=;u9=;u10=;u7=;u13=;u14=;u11=;u17=;u18=unknown;u20=;ord=1956603866265.9536"/></body></html>'
 
 = HTTP decompression (brotli)
+~ brotli
 
 conf.debug_dissector = True
 load_layer("http")
@@ -7651,6 +7767,18 @@ assert pkts[1][H2Frame].settings[0].id == 3
 for i in range(3, 10):
     assert HTTP not in pkts[i]
     assert H2Frame in pkts[i]
+
+= Test chunked with gzip
+
+conf.contribs["http"]["auto_compression"] = False
+z = b'\x1f\x8b\x08\x00S\\-_\x02\xff\xb3\xc9(\xc9\xcd\xb1\xcb\xcd)\xb0\xd1\x07\xb3\x00\xe6\xedpt\x10\x00\x00\x00'
+a = IP(dst="1.1.1.1", src="2.2.2.2")/TCP(seq=1)/HTTP()/HTTPResponse(Content_Encoding="gzip", Transfer_Encoding="chunked")/(b"5\r\n" + z[:5] + b"\r\n")
+b = IP(dst="1.1.1.1", src="2.2.2.2")/TCP(seq=len(a[TCP].payload)+1)/HTTP()/(hex(len(z[5:])).encode()[2:] + b"\r\n" + z[5:] + b"\r\n0\r\n\r\n")
+xa, xb = IP(raw(a)), IP(raw(b))
+conf.contribs["http"]["auto_compression"] = True
+
+c = sniff(offline=[xa, xb], session=TCPSession)[0]
+assert gzip_decompress(z) == c.load
 
 ############
 ############
@@ -7789,6 +7917,15 @@ for p in ffrags:
     plen += len(p.payload)
 
 assert plen == payloadlen
+
+= fragment() with non-multiple-of-8 MTU
+paylen = 1400 + 1
+frags1 = fragment(IP() / ("X" * paylen), paylen)
+assert len(frags1) == 1
+frags2 = fragment(IP() / ("X" * (paylen + 1)), paylen)
+assert len(frags2) == 2
+assert len(frags2[0]) == 20 + paylen - paylen % 8
+assert len(frags2[1]) == 20 + 1 + paylen % 8
 
 = defrag()
 nonfrag, unfrag, badfrag = defrag(frags)
@@ -7990,6 +8127,10 @@ assert bpkt.chksum == 0x70bc and bpkt.payload.chksum == 0x4b2c
 pkt = IP(len=54, ihl=6, options=[IPOption_RR()]) / TCP() / ("A" * 10)
 bpkt = IP(raw(pkt))
 assert bpkt.chksum == 0x70bc and bpkt.payload.chksum == 0x4b2c
+
+pkt = IP(options=[IPOption_Timestamp()]) / TCP() / ("A" * 10)
+bpkt = IP(raw(pkt))
+assert bpkt.chksum == 0x2caa and bpkt.payload.chksum == 0x4b2c
 
 pkt = IP() / UDP()
 bpkt = IP(raw(pkt))
@@ -8794,6 +8935,44 @@ ff02::%lo0/32                     ::1                           U           lo0
 test_freebsd_10_2()
 
 
+= FreeBSD 13.0
+~ mock_read_routes_bsd
+
+import mock
+from io import StringIO
+
+@mock.patch("scapy.arch.unix.os")
+def test_freebsd_13(mock_os):
+    """Test read_routes() on FreeBSD 13"""
+    # 'netstat -rnW -f inet' output
+    netstat_output = u"""
+Routing tables
+
+Internet:
+Destination        Gateway            Flags   Nhop#    Mtu      Netif Expire
+default            10.0.0.1           UGS         3   1500     vtnet0
+10.0.0.0/24        link#1             U           2   1500     vtnet0
+10.0.0.8           link#2             UHS         1  16384        lo0
+127.0.0.1          link#2             UH          1  16384        lo0
+"""
+    # Mocked file descriptor
+    strio = StringIO(netstat_output)
+    mock_os.popen = mock.MagicMock(return_value=strio)
+    # Test the function
+    from scapy.arch.unix import read_routes
+    routes = read_routes()
+    scapy.arch.unix.DARWIN = False
+    scapy.arch.unix.FREEBSD = True
+    scapy.arch.unix.NETBSD = False
+    scapy.arch.unix.OPENBSD = False
+    for r in routes:
+        print(r)
+        assert(r[3] in ["vtnet0", "lo0"])
+    assert(len(routes) == 4)
+
+test_freebsd_13()
+
+
 = OpenBSD 5.5
 ~ mock_read_routes_bsd
 
@@ -9477,6 +9656,12 @@ assert(p.leap == 0)
 assert(p.version == 4)
 assert(p.mode == 3)
 assert(p.stratum == 2)
+
+= NTPAuthenticator
+
+s = hex_bytes("000c2962f268d094666d23750800450000640db640004011a519c0a80364c0a80305a51e007b0050731a2300072000000000000000000000000000000000000000000000000000000000000000000000000052c7bc1dda64b97d0000000bcdc3825dbf6b7ad02886ff45aa8b2eaf7ac78bc1")
+p = Ether(s)
+assert NTPAuthenticator in p and p[NTPAuthenticator].key_id == 3452142173
 
 
 ############
@@ -11375,6 +11560,7 @@ len(r4.routes) == len_r4
 
 dummy_interface = get_dummy_interface()
 
+bck_conf_route_routes = conf.route.routes
 conf.route.routes = [
     (0, 0, '172.21.230.1', dummy_interface, '172.21.230.10', 1),                # 0.0.0.0         / 0.0.0.0         == 255.255.255.255
     (2851995648, 4294901760, '0.0.0.0', dummy_interface, '172.21.230.10', 1),   # 169.254.0.0     / 255.255.0.0     == 169.254.255.255
@@ -11386,7 +11572,7 @@ conf.route.routes = [
     ]
 
 assert sorted(conf.route.get_if_bcast(dummy_interface)) == sorted(['169.254.255.255', '172.21.230.255', '239.255.255.255'])
-conf.route.resync()
+conf.route.routes = bck_conf_route_routes
 
 ############
 ############
@@ -11438,6 +11624,9 @@ assert(ro == ("1.2.3.11" if six.PY2 else "1.2.3.12"))
 random.seed(0x2807)
 rex = RandRegExp("[g-v]* @? [0-9]{3} . (g|v)")
 bytes(rex) == ('vmuvr @ 906 \x9e g' if six.PY2 else b'irrtv @ 517 \xc2\xb8 v')
+
+rex = RandRegExp("[:digit:][:space:][:word:]")
+assert re.match(b"\\d\\s\\w", bytes(rex))
 
 = Corrupted(Bytes|Bits)
 
@@ -11883,7 +12072,7 @@ assert BOOTP().hashret() == b"\x00\x00\x00\x00"
 
 import random
 random.seed(0x2809)
-assert str(RandDHCPOptions(size=1)) in [r"[('NIS_server', '0.45.231.69')]", r"[('ieee802-3-encapsulation', 229)]"]
+assert str(RandDHCPOptions(size=1)) in [r"[('NIS_server', '0.45.231.69')]", r"[('tcp_ttl', 229)]"]
 
 = DHCPOptionsField
 
@@ -11935,6 +12124,14 @@ assert p3[DHCP].options[4] == ("max_dgram_reass_size", 120)
 assert p3[DHCP].options[5] == ("pxelinux_path_prefix", b'/some/path')
 assert p3[DHCP].options[6] == "end"
 
+= DHCPOptions
+
+# Issue #2786
+
+assert DHCPOptions[33].name == "static-routes"
+assert DHCPOptions[46].name == "NetBIOS_node_type"
+assert DHCPRevOptions['static-routes'][0] == 33
+
 ############
 ############
 + 802.11
@@ -11956,11 +12153,14 @@ s == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
 = Dot11 - dissection
 p = Dot11(s)
 Dot11 in p and p.addr3 == "00:00:00:00:00:00"
-p.mysummary() == '802.11 Management 0 00:00:00:00:00:00 > 00:00:00:00:00:00'
+assert p.mysummary() == '802.11 Management Association Request 00:00:00:00:00:00 (TA=SA) > 00:00:00:00:00:00 (RA=DA)'
+assert "DA" in p.address_meaning(1)
+assert "SA" in p.address_meaning(2)
+assert "BSSID" in p.address_meaning(3)
 
 = Dot11QoS - build
 s = raw(Dot11()/Dot11QoS(Ack_Policy=1))
-assert s == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00 \x00'
+assert s == b'\xc8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00 \x00'
 
 s = raw(Dot11(type=2, subtype=8)/Dot11QoS(TID=4))
 assert s == b'\x88\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00'
@@ -11983,7 +12183,11 @@ assert pkt[Dot11Elt::{"ID": 0}].summary() in [
 
 = Dot11QoS - dissection
 p = Dot11(s)
-Dot11QoS in p
+assert Dot11QoS in p
+assert p.TID == 4
+assert "DA" in p.address_meaning(1)
+assert "SA" in p.address_meaning(2)
+assert "BSSID" in p.address_meaning(3)
 
 = Dot11 - answers
 query = Dot11(type=0, subtype=0)
@@ -11995,7 +12199,7 @@ assert Dot11Elt(ID=1).mysummary() == ""
 assert Dot11(b'\x84\x00\x00\x00\x00\x11\x22\x33\x44\x55\x00\x11\x22\x33\x44\x55').addr2 == '00:11:22:33:44:55'
 
 = Multiple Dot11Elt layers
-pkt = Dot11() / Dot11Beacon() / Dot11Elt(ID="Rates") / Dot11Elt(ID="SSID", info="Scapy")
+pkt = Dot11() / Dot11Beacon() / Dot11Elt(ID="Supported Rates") / Dot11Elt(ID="SSID", info="Scapy")
 assert pkt[Dot11Elt::{"ID": 0}].info == b"Scapy"
 assert pkt.getlayer(Dot11Elt, ID=0).info == b"Scapy"
 
@@ -12027,6 +12231,10 @@ assert pkt[Dot11TKIP].TSC2 == 1
 assert pkt[Dot11TKIP].TSC3 == 33
 assert pkt[Dot11TKIP].TSC4 == 0
 assert pkt[Dot11TKIP].TSC5 == 160
+
+assert "DA" in pkt[Dot11].address_meaning(1)
+assert "TA=BSSID" in pkt[Dot11].address_meaning(2)
+assert "SA" in pkt[Dot11].address_meaning(3)
 
 = Dot11CCMP - dissection
 
@@ -12062,7 +12270,7 @@ nstats
 assert nstats == {
    'channel': 8,
    'crypto': {'WPA2/PSK'},
-   'rates': [130, 132, 12, 18, 24, 36, 48, 72, 96, 108],
+   'rates': [1.0, 2.0, 6.0, 9.0, 12.0, 18.0, 24.0, 36.0, 48.0, 54.0],
    'ssid': 'SSID76',
    'country': 'US',
    'country_desc_type': 'Indoor'
@@ -12074,7 +12282,7 @@ nstats = pkt[Dot11Beacon].network_stats()
 nstats
 assert nstats == {
    'ssid': 'WPA3-Network',
-   'rates': [130, 132, 139, 150, 12, 18, 24, 36],
+   'rates': [1.0, 2.0, 5.5, 11.0, 6.0, 9.0, 12.0, 18.0, 24.0, 36.0, 48.0, 54.0],
    'channel': 1,
    'crypto': {'WPA3/SAE'}
 }
@@ -12135,6 +12343,22 @@ assert rsn_ie.akm_suites[0].suite == 0x01
 assert rsn_ie.pre_auth
 assert Dot11Elt in rsn_ie
 
+pkt = RadioTap(b"\x00\x000\x00/@\x00\xa0 \x08\x00\xa0 \x08\x00\xa0 \x08\x00\x00\x00\x00\x00\x00\x0bpin;%\xedN\x10\x0cl\t\xc0\x00\xce\x00\x00\x00\xb2\x00\xbd\x01\xce\x02\x80\x00\x00\x00\xff\xff\xff\xff\xff\xff\xec\x17/\x82\x1e)\xec\x17/\x82\x1e)\x10p\x81a\xa1\x08\x00\x00\x00\x00d\x001\x04\x00\rROUTE-821E295\x01\x01\x8c\x03\x01\x01\x05\x04\x00\x02\x00\x00\x07$IL \x01\x01\x14\x02\x01\x14\x03\x01\x14\x04\x01\x14\x05\x01\x14\x06\x01\x14\x07\x01\x14\x08\x01\x14\t\x01\x14\n\x01\x14\x0b\x01\x14;\x12QQRSTstuvwxyz{}~\x7f\x80*\x01\x000\x1a\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x02\x8c\x00\x00\x00\x00\x0f\xac\x06-\x1a\x8d\x01\x1f\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00=\x16\x01\x00\x15\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xdd\x18\x00P\xf2\x02\x01\x01\x81\x00\x03\xa4\x00\x00'\xa4\x00\x00BT^\x00a2/\x00\x7f\x01\x04\xdd\x07\x00\xa0\xc6\x02\x02\x03\x00\xdd\x17\xec\x17/RRRRRRRRRRRRRRRRRRRRR\x9e[\xf2")
+assert Dot11EltRSN in pkt
+pkt[Dot11Beacon].network_stats()
+assert pkt[Dot11Beacon].network_stats() == {
+    'ssid': 'ROUTE-821E295',
+    'rates': [6.0],
+    'channel': 1,
+    'country': 'IL',
+    'country_desc_type': None,
+    'crypto': {'WPA2/PSK'}
+}
+assert [x.ID for x in pkt[Dot11Elt].iterpayloads()] == [0, 1, 3, 5, 7, 59, 42, 48, 45, 61, 221, 127, 221, 221]
+assert pkt.pmkids.nb_pmkids == 0
+assert pkt.group_management_cipher_suite.oui == 0xfac
+assert pkt.group_management_cipher_suite.cipher == 0x6
+
 = Dot11EltMicrosoftWPA
 assert bytes(Dot11EltMicrosoftWPA()) == b'\xdd\x16\x00P\xf2\x01\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x01'
 ms_wpa_ie = Dot11EltMicrosoftWPA(b'\xdd\x1a\x00P\xf2\x01\x01\x00\x00P\xf2\x02\x02\x00\x00P\xf2\x04\x00P\xf2\x02\x01\x00\x00P\xf2\x01')
@@ -12173,12 +12397,141 @@ assert f[Dot11EltMicrosoftWPA].pairwise_cipher_suites[0].cipher == 0x04
 assert f[Dot11EltMicrosoftWPA].nb_akm_suites == 0x01
 assert f[Dot11EltMicrosoftWPA].akm_suites[0].suite == 0x01
 
+= HT Capabilities
+f = RadioTap(b"\x00\x00&\x00/@\x00\xa0 \x08\x00\xa0 \x08\x00\x00\x9dt\xc3\xf1\x18\x00\x00\x00\x10\x02l\t\xa0\x00\xd9\x00\x00\x00\xd3\x00\xd7\x01@\x00\x00\x00\xff\xff\xff\xff\xff\xff\xaa\xaa\xaa\xaa\xaa\xaa\xff\xff\xff\xff\xff\xffP'\x00\x00\x01\x04\x02\x04\x0b\x162\x08\x0c\x12\x18$0H`l\x03\x01\x01-\x1a-@\x17\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x7f\x08\x00\x00\x08\x04\x00\x00\x00@Y\xb7T\x13")
+assert Dot11EltHTCapabilities in f
+assert f.L_SIG_TXOP_Protection == 0
+assert f.Forty_Mhz_Intolerant == 1
+assert f.PSMP == 0
+assert f.DSSS_CCK == 0
+assert f.Max_A_MSDU == 0
+assert f.Delayed_BlockAck == 0
+assert f.Rx_STBC == 0
+assert f.Tx_STBC == 0
+assert f.Short_GI_40Mhz == 0
+assert f.Short_GI_20Mhz == 1
+assert f.Green_Field == 0
+assert f.SM_Power_Save == 3
+assert f.Supported_Channel_Width == 0
+assert f.LDPC_Coding_Capability == 1
+assert f.res == 0
+assert f.Min_MPDCU_Start_Spacing == 5
+assert f.Max_A_MPDU_Length_Exponent == 3
+assert f.TX_Unequal_Modulation == 0
+assert f.TX_Max_Spatial_Streams == 0
+assert f.TX_RX_MCS_Set_Not_Equal == 0
+assert f.TX_MCS_Set_Defined == 0
+assert f.RX_Highest_Supported_Data_Rate == 0
+assert f.RX_MSC_Bitmask == 255
+assert f.RD_Responder == 0
+assert f.HTC_HT_Support == 0
+assert f.MCS_Feedback == 0
+assert f.PCO_Transition_Time == 0
+assert f.PCO == 0
+assert f.Channel_Estimation_Capability == 0
+assert f.CSI_max_n_Rows_Beamformer_Supported == 0
+assert f.Compressed_Steering_n_Beamformer_Antennas_Supported == 0
+assert f.Noncompressed_Steering_n_Beamformer_Antennas_Supported == 0
+assert f.CSI_n_Beamformer_Antennas_Supported == 0
+assert f.Minimal_Grouping == 0
+assert f.Explicit_Compressed_Beamforming_Feedback == 0
+assert f.Explicit_Noncompressed_Beamforming_Feedback == 0
+assert f.Explicit_Transmit_Beamforming_CSI_Feedback == 0
+assert f.Explicit_Compressed_Steering == 0
+assert f.Explicit_Noncompressed_Steering == 0
+assert f.Explicit_CSI_Transmit_Beamforming == 0
+assert f.Calibration == 0
+assert f.Implicit_Trasmit_Beamforming == 0
+assert f.Transmit_NDP == 0
+assert f.Receive_NDP == 0
+assert f.Transmit_Staggered_Sounding == 0
+assert f.Receive_Staggered_Sounding == 0
+assert f.Implicit_Transmit_Beamforming_Receiving == 0
+assert f.ASEL == 0
+
+= HT Capabilities with fuzzed values
+# Those were checked with Wireshark !
+f = RadioTap(b'\x00\x00\t\x00\x02\x00\x00\x00\x10@\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00-\x1a\xecH\xbf\x85!\x02\xd0m\x91\xa8\xd9\xf0\xa9\xb8\x15\xae\x00\x00\x00,Y\x86\xb3H\xa7?Z\xd2\xa8\xc2')
+assert Dot11EltHTCapabilities in f
+assert f.L_SIG_TXOP_Protection == 0
+assert f.Forty_Mhz_Intolerant == 1
+assert f.PSMP == 0
+assert f.DSSS_CCK == 0
+assert f.Max_A_MSDU == 1
+assert f.Delayed_BlockAck == 0
+assert f.Rx_STBC == 0
+assert f.Tx_STBC == 1
+assert f.Short_GI_40Mhz == 1
+assert f.Short_GI_20Mhz == 1
+assert f.Green_Field == 0
+assert f.SM_Power_Save == 3
+assert f.Supported_Channel_Width == 0
+assert f.LDPC_Coding_Capability == 0
+assert f.res == 5
+assert f.Min_MPDCU_Start_Spacing == 7
+assert f.Max_A_MPDU_Length_Exponent == 3
+assert f.TX_Unequal_Modulation == 0
+assert f.TX_Max_Spatial_Streams == 3
+assert f.TX_RX_MCS_Set_Not_Equal == 1
+assert f.TX_MCS_Set_Defined == 0
+assert f.RX_Highest_Supported_Data_Rate == 440
+assert f.RX_MSC_Bitmask == 46944200869120244326789
+assert f.RD_Responder == 1
+assert f.HTC_HT_Support == 0
+assert f.MCS_Feedback == 1
+assert f.PCO_Transition_Time == 2
+assert f.PCO == 0
+assert f.Channel_Estimation_Capability == 0
+assert f.CSI_max_n_Rows_Beamformer_Supported == 3
+assert f.Compressed_Steering_n_Beamformer_Antennas_Supported == 2
+assert f.Noncompressed_Steering_n_Beamformer_Antennas_Supported == 2
+assert f.CSI_n_Beamformer_Antennas_Supported == 1
+assert f.Minimal_Grouping == 0
+assert f.Explicit_Compressed_Beamforming_Feedback == 1
+assert f.Explicit_Noncompressed_Beamforming_Feedback == 1
+assert f.Explicit_Transmit_Beamforming_CSI_Feedback == 2
+assert f.Explicit_Compressed_Steering == 0
+assert f.Explicit_Noncompressed_Steering == 1
+assert f.Explicit_CSI_Transmit_Beamforming == 1
+assert f.Calibration == 2
+assert f.Implicit_Trasmit_Beamforming == 0
+assert f.Transmit_NDP == 0
+assert f.Receive_NDP == 0
+assert f.Transmit_Staggered_Sounding == 1
+assert f.Receive_Staggered_Sounding == 1
+assert f.Implicit_Transmit_Beamforming_Receiving == 0
+assert f.ASEL.resTransmit_Sounding_PPDUs
+assert f.ASEL.Receive_ASEL
+assert f.ASEL.Antenna_Indices_Feedback
+assert f.ASEL.Explicit_CSI_Feedback
+assert f.ASEL.Explicit_CSI_Feedback_Based_Transmit_ASEL
+assert f.ASEL.Antenna_Selection
+assert f.ASEL == 63
+
+= RadioTap - MCS weird padding
+f = RadioTap(b'\x00\x00,\x00K\x08\x1c\x00"b\x96\x03\x00\x00\x00\x00\x10\x00l\t\x80\x04\xb0\x00\x80\x04\x01\x00l\t\x01\x00\x1f\x08\x0c\x00\x94\x05\x00\x00\x04\x00\x00\x00\x88\x020\x00.\xdf\xc4J\xb0\xdc\xa0c\x91sf\xech\x05\xca?\xf4h@Y\x00\x00\xaa\xaa\x03\x00\x00\x00\x08\x00E\x00\x05\xdc \xcf@\x00\x80\x06P\xf0\xc0\xa8\x01\n\xc0\xa8\x01\x02\xdb\x8f\x13\x89\xfbv\xa3\xde\xf6\xd8L\xe8P\x10\xff\xfft\xdd\x00\x0023456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901O\xdc\x01x')
+assert f.knownMCS == 31
+assert f.Ness_LSB == 0
+assert f.STBC_streams == 0
+assert f.FEC_type == 0
+assert f.HT_format == 1
+assert f.guard_interval == 0
+assert f.MCS_bandwidth == 0
+assert f.MCS_index == 0xc
+assert f.A_MPDU_ref == 1428
+
 = Reassociation request
 f = Dot11(b' \x00:\x01@\xe3\xd6\x7f*\x00\x00\x10\x18\xa9l.@\xe3\xd6\x7f*\x00 \t1\x04\n\x00@\xe3\xd6\x7f*\x00\x00\x064.2.12\x01\x08\x82\x84\x0b\x16$0Hl!\x02\x08\x1a$\x02\x01\x0b0&\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x01\x00\x00\x01\x00LD\xfe\xf2l\xdcV\xce\x0b7\xab\xc62\x02O\x112\x04\x0c\x12\x18`\x7f\x08\x01\x00\x00\x00\x00\x00\x00@\xdd\t\x00\x10\x18\x02\x00\x00\x10\x00\x00')
 assert Dot11EltRSN in f
 assert f[Dot11EltRSN].pmkids.nb_pmkids == 1
 assert len(f[Dot11EltRSN].pmkids.pmkid_list) == 1
 assert f[Dot11EltRSN].pmkids.pmkid_list[0] == b'LD\xfe\xf2l\xdcV\xce\x0b7\xab\xc62\x02O\x11'
+
+= Backward compatibility of Dot11Elt
+
+# Old naming scheme
+assert Dot11Elt(ID="DSset").sprintf("%ID%") == 'DSSS Set'
+assert Dot11Elt(ID="RSNinfo").sprintf("%ID%") == 'RSN'
 
 
 ######################################
@@ -12212,9 +12565,6 @@ assert a.src == '00:00:00:00:00:00'
 = MIB
 ~ mib
 
-import copy
-old_mib = copy.copy(conf.mib)
-
 import tempfile
 fd, fname = tempfile.mkstemp()
 os.write(fd, b"-- MIB test\nscapy       OBJECT IDENTIFIER ::= {test 2807}\n")
@@ -12224,12 +12574,6 @@ load_mib(fname)
 assert(sum(1 for k in six.itervalues(conf.mib.__dict__) if "scapy" in k) == 1)
 
 assert(sum(1 for oid in conf.mib) > 100)
-
-assert(conf.mib._my_find("MIB", "keyUsage"))
-
-assert(len(conf.mib._find("MIB", "keyUsage")))
-
-assert(len(conf.mib._recurs_find_all((), "MIB", "keyUsage")))
 
 = MIB - graph
 ~ mib
@@ -12246,37 +12590,42 @@ def get_mib_graph(do_graph):
 
 get_mib_graph()
 
-= Restore conf.mib
+= MIB - test aliases
 ~ mib
-conf.mib = old_mib
+
+# https://github.com/secdev/scapy/issues/2542
+assert conf.mib._oidname("2.5.29.19") == "basicConstraints"
 
 = DADict tests
 
 a = DADict("test")
-a.test_value = "scapy"
+a[0] = "test_value1"
+a["scapy"] = "test_value2"
+
+assert a.test_value1 == 0
+assert a.test_value2 == "scapy"
+
 with ContextManagerCaptureOutput() as cmco:
     a._show()
-    assert(cmco.get_output() == "test_value = 'scapy'\n")
+    outp = cmco.get_output()
 
-b = DADict("test2")
-b.test_value_2 = "hello_world"
+assert "scapy = 'test_value2'" in outp
+assert "0 = 'test_value1'" in outp
 
-a._branch(b, 1)
+= Test ETHER_TYPES
+
+assert ETHER_TYPES.IPv4 == 2048
 try:
-    a._branch(b, 1)
-    assert False
-except DADict_Exception:
+    import warnings
+    
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        ETHER_TYPES["BAOBAB"] = 0xffff
+        assert ETHER_TYPES.BAOBAB == 0xffff
+        assert issubclass(w[-1].category, DeprecationWarning)
+except DeprecationWarning:
+    # -Werror is used
     pass
-
-assert(len(a._find("test2")))
-
-assert(len(a._find(test_value_2="hello_world")))
-
-assert(len(a._find_all("test2")))
-
-assert(not a._recurs_find((a,)))
-
-assert(not a._recurs_find_all((a,)))
 
 = BER tests
 
@@ -13005,13 +13354,19 @@ if PYX and not six.PY2:
 import pickle
 
 frm = Ether(src='00:11:22:33:44:55', dst='00:22:33:44:55:66')/Raw()
+frm.time = EDecimal(123.45)
+frm.sniffed_on = "iface"
+frm.wirelen = 1
 pl = PacketList(res=[frm, frm], name='WhatAGreatName')
 pickled = pickle.dumps(pl)
 pl = pickle.loads(pickled)
-assert(pl.listname == "WhatAGreatName")
-assert(len(pl) == 2)
-assert(pl[0][Ether].src == '00:11:22:33:44:55')
-assert(pl[1][Ether].dst == '00:22:33:44:55:66')
+assert pl.listname == "WhatAGreatName"
+assert len(pl) == 2
+assert pl[0].time == 123.45
+assert pl[0].sniffed_on == "iface"
+assert pl[0].wirelen == 1
+assert pl[0][Ether].src == '00:11:22:33:44:55'
+assert pl[1][Ether].dst == '00:22:33:44:55:66'
 
 
 ############
